@@ -1,6 +1,7 @@
 import logging
 import os
 import re
+import asyncio
 
 import jsonpickle
 from django.conf import settings
@@ -176,7 +177,7 @@ class MessageHandler:
                 self.save_session()
                 return "确认执行: " + info + " 命令?"
 
-        return ChatGPT.chat(info)
+        return asyncio.run(ChatGPT.chat(info))
 
 
 class WxUserInfo():
