@@ -49,7 +49,12 @@ def convert_to_article_reply(articles, message):
 @robot.filter(re.compile(r"^\?.*"))
 def search(message, session):
     s = message.content
-    searchstr = str(s).replace('?', '')
+    searchstr = str(s).replace('?', '', 1).strip()
+    if searchstr.lower().startswith('chat'):
+        prompt = searchstr[4:].lstrip(' :：')
+        if not prompt:
+            return '请输入 ?chat 后要发送的内容。'
+        return ChatGPT.ask(prompt)
     result = blogapi.search_articles(searchstr)
     if result:
         articles = list(map(lambda x: x.object, result))
@@ -83,6 +88,8 @@ def help(message, session):
         你可以通过下面这些命令来获得信息
         ?关键字搜索文章.
         如?python.
+        ?chat 发送聊天消息.
+        如?chat 你好.
         category获得文章分类目录及文章数.
         category-***获得该分类目录文章
         如category-python
@@ -176,7 +183,7 @@ class MessageHandler:
                 self.save_session()
                 return "确认执行: " + info + " 命令?"
 
-        return ChatGPT.chat(info)
+        return ChatGPT.ask(info)
 
 
 class WxUserInfo():
