@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import os
 import re
@@ -176,7 +177,12 @@ class MessageHandler:
                 self.save_session()
                 return "确认执行: " + info + " 命令?"
 
-        return ChatGPT.chat(info)
+        try:
+            loop = asyncio.get_event_loop()
+        except RuntimeError:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+        return loop.run_until_complete(ChatGPT.chat(info))
 
 
 class WxUserInfo():
