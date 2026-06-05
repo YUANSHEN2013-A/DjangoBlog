@@ -176,7 +176,11 @@ class MessageHandler:
                 self.save_session()
                 return "确认执行: " + info + " 命令?"
 
-        return ChatGPT.chat(info)
+        try:
+            return ChatGPT.chat(info)
+        except Exception as e:
+            logger.error(f"ChatGPT调用失败: {e}")
+            return "抱歉，智能对话服务暂时不可用，请稍后再试"
 
 
 class WxUserInfo():
