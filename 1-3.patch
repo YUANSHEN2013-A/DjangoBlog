@@ -1,0 +1,212 @@
+diff --git a/deploy/docker-compose/docker-compose.es.yml b/deploy/docker-compose/docker-compose.es.yml
+index c7c0039..4ed5fce 100644
+--- a/deploy/docker-compose/docker-compose.es.yml
++++ b/deploy/docker-compose/docker-compose.es.yml
+@@ -1,6 +1,20 @@
+ version: '3'
+ 
+ services:
++  db:
++    image: mysql:latest
++    restart: always
++    environment:
++      - MYSQL_DATABASE=djangoblog
++      - MYSQL_ROOT_PASSWORD=QQQQwww123!@#
++    ports:
++      - 3306:3306
++    volumes:
++      - mysql_data:/var/lib/mysql
++    depends_on:
++      - redis
++    container_name: db
++
+   es:
+     image: liangliangyy/elasticsearch-analysis-ik:8.6.1
+     container_name: es
+@@ -8,41 +22,86 @@ services:
+     environment:
+       - discovery.type=single-node
+       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
++      - xpack.security.enabled=false
++      - xpack.monitoring.templates.enabled=false
+     ports:
+       - 9200:9200
+     volumes:
+-      - ./bin/datas/es/:/usr/share/elasticsearch/data/
++      - es_data:/usr/share/elasticsearch/data
++    healthcheck:
++      test: ["CMD-SHELL", "curl -sf http://localhost:9200/_cluster/health || exit 1"]
++      interval: 10s
++      timeout: 5s
++      retries: 30
++      start_period: 40s
+ 
+   kibana:
+     image: kibana:8.6.1
+     restart: always
+     container_name: kibana
+-    ports:
+-      - 5601:5601
+     environment:
+       - ELASTICSEARCH_HOSTS=http://es:9200
++      - SERVER_BASEPATH=/kibana
++      - SERVER_REWRITEBASEPATH=true
++    depends_on:
++      es:
++        condition: service_healthy
++    ports:
++      - 5601:5601
+ 
+   djangoblog:
+-    build: .
++    build:
++      context: ../../
++      dockerfile: Dockerfile
+     restart: always
+-    command: bash -c 'sh /code/djangoblog/bin/docker_start.sh'
++    command: bash -c 'sh /code/djangoblog/deploy/entrypoint.sh'
+     ports:
+       - "8000:8000"
+     volumes:
+-      - ./collectedstatic:/code/djangoblog/collectedstatic
++      - static_files:/code/djangoblog/collectedstatic
++      - ./logs:/code/djangoblog/logs
+       - ./uploads:/code/djangoblog/uploads
+     environment:
++      - DJANGO_DEBUG=False
+       - DJANGO_MYSQL_DATABASE=djangoblog
+       - DJANGO_MYSQL_USER=root
+       - DJANGO_MYSQL_PASSWORD=QQQQwww123!@#
+       - DJANGO_MYSQL_HOST=db
+       - DJANGO_MYSQL_PORT=3306
+-      - DJANGO_MEMCACHED_LOCATION=memcached:11211
++      - DJANGO_REDIS_URL=redis:6379
+       - DJANGO_ELASTICSEARCH_HOST=es:9200
+     links:
+       - db
+-      - memcached
++      - redis
++      - es
+     depends_on:
+       - db
++      - es
+     container_name: djangoblog
+ 
++  nginx:
++    restart: always
++    image: nginx:latest
++    ports:
++      - "80:80"
++      - "443:443"
++    volumes:
++      - ../nginx.conf:/etc/nginx/nginx.conf
++      - ../.htpasswd:/etc/nginx/.htpasswd:ro
++      - static_files:/code/djangoblog/collectedstatic:ro
++    links:
++      - djangoblog:djangoblog
++      - kibana:kibana
++    container_name: nginx
++
++  redis:
++    restart: always
++    image: redis:latest
++    container_name: redis
++    ports:
++      - "6379:6379"
++
++volumes:
++  mysql_data:
++  static_files:
++  es_data:
+\ No newline at end of file
+diff --git a/deploy/docker-compose/docker-compose.yml b/deploy/docker-compose/docker-compose.yml
+index bde9cd2..20abfcb 100644
+--- a/deploy/docker-compose/docker-compose.yml
++++ b/deploy/docker-compose/docker-compose.yml
+@@ -50,6 +50,7 @@ services:
+       - "443:443"
+     volumes:
+       - ../nginx.conf:/etc/nginx/nginx.conf
++      - ../.htpasswd:/etc/nginx/.htpasswd:ro
+       # 使用同一个named volume访问静态文件
+       - static_files:/code/djangoblog/collectedstatic:ro
+     links:
+diff --git a/deploy/entrypoint.sh b/deploy/entrypoint.sh
+index 801df4d..672121e 100644
+--- a/deploy/entrypoint.sh
++++ b/deploy/entrypoint.sh
+@@ -24,8 +24,32 @@ python manage.py makemigrations && \
+   echo "Copying .vite directory to collectedstatic..." && \
+   mkdir -p collectedstatic/blog/dist/.vite && \
+   cp -r blog/static/blog/dist/.vite/* collectedstatic/blog/dist/.vite/ && \
+-  python manage.py compress --force && \
+-  python manage.py build_index && \
++  python manage.py compress --force
++
++if [ -n "$DJANGO_ELASTICSEARCH_HOST" ]; then
++  echo "Elasticsearch host detected: $DJANGO_ELASTICSEARCH_HOST"
++  echo "Waiting for Elasticsearch to be ready..."
++
++  ES_HOST=$(echo "$DJANGO_ELASTICSEARCH_HOST" | sed 's|^http://||' | sed 's|^https://||')
++  MAX_RETRIES=60
++  RETRY_COUNT=0
++
++  while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
++    if curl -sf "http://${ES_HOST}/_cluster/health" > /dev/null 2>&1; then
++      echo "Elasticsearch is ready!"
++      break
++    fi
++    RETRY_COUNT=$((RETRY_COUNT + 1))
++    echo "Elasticsearch not ready yet (attempt $RETRY_COUNT/$MAX_RETRIES), waiting..."
++    sleep 5
++  done
++
++  if [ $RETRY_COUNT -ge $MAX_RETRIES ]; then
++    echo "WARNING: Elasticsearch did not become ready after $MAX_RETRIES attempts. Proceeding anyway..."
++  fi
++fi
++
++python manage.py build_index && \
+   python manage.py compilemessages  || exit 1
+ 
+ exec gunicorn ${DJANGO_WSGI_MODULE}:application \
+@@ -36,4 +60,4 @@ exec gunicorn ${DJANGO_WSGI_MODULE}:application \
+ --log-level=debug \
+ --log-file=- \
+ --worker-class gevent \
+---threads 4
++--threads 4
+\ No newline at end of file
+diff --git a/deploy/nginx.conf b/deploy/nginx.conf
+index 32161d8..4c48468 100644
+--- a/deploy/nginx.conf
++++ b/deploy/nginx.conf
+@@ -35,6 +35,21 @@ http {
+       expires max;
+       alias /code/djangoblog/collectedstatic/;
+     }
++
++    location /kibana/ {
++      resolver 127.0.0.11 valid=10s ipv6=off;
++      set $kibana_backend "kibana:5601";
++      auth_basic "Kibana Access";
++      auth_basic_user_file /etc/nginx/.htpasswd;
++      proxy_pass http://$kibana_backend/kibana/;
++      proxy_set_header Host $host;
++      proxy_set_header X-Real-IP $remote_addr;
++      proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
++      proxy_set_header X-Forwarded-Proto $scheme;
++      proxy_buffering off;
++      proxy_read_timeout 300s;
++    }
++
+     location / {
+       proxy_set_header X-Real-IP $remote_addr;
+       proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+@@ -47,4 +62,4 @@ http {
+       }
+     }
+   }
+-}
++}
+\ No newline at end of file
