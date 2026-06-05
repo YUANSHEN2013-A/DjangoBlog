@@ -1,0 +1,203 @@
+diff --git a/servermanager/api/commonapi.py b/servermanager/api/commonapi.py
+index 83ad9ff..e7c111d 100644
+--- a/servermanager/api/commonapi.py
++++ b/servermanager/api/commonapi.py
+@@ -1,28 +1,127 @@
+ import logging
+ import os
++import re
++import subprocess
+ 
+ import openai
++from openai import OpenAI, AsyncOpenAI, APIError, APITimeoutError, ConnectionError, RateLimitError
+ 
+ from servermanager.models import commands
+ 
+ logger = logging.getLogger(__name__)
+ 
+-openai.api_key = os.environ.get('OPENAI_API_KEY')
+-if os.environ.get('HTTP_PROXY'):
+-    openai.proxy = os.environ.get('HTTP_PROXY')
++api_key = os.environ.get('OPENAI_API_KEY')
++base_url = os.environ.get('OPENAI_BASE_URL')
++http_proxy = os.environ.get('HTTP_PROXY')
++
++sync_client = OpenAI(
++    api_key=api_key,
++    base_url=base_url,
++    proxy=http_proxy
++) if api_key else None
++
++async_client = AsyncOpenAI(
++    api_key=api_key,
++    base_url=base_url,
++    proxy=http_proxy
++) if api_key else None
++
++SAFE_COMMANDS = {
++    'clear_cache': {
++        'func': lambda: subprocess.run(
++            ['python', 'manage.py', 'clear_cache'],
++            capture_output=True, text=True, timeout=60,
++            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++        ),
++        'describe': '清除缓存'
++    },
++    'build_index': {
++        'func': lambda: subprocess.run(
++            ['python', 'manage.py', 'build_index'],
++            capture_output=True, text=True, timeout=120,
++            cwd=os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
++        ),
++        'describe': '重建索引'
++    },
++    'ping_baidu': {
++        'func': lambda args: _validate_ping_args(args) and subprocess.run(
++            ['ping', '-c', '4', args[0]],
++            capture_output=True, text=True, timeout=30
++        ),
++        'describe': 'ping测试',
++        'param_pattern': re.compile(r'^[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9\-]{0,61}[a-zA-Z0-9])?)*$'),
++        'max_params': 1
++    },
++}
++
++
++def _validate_ping_args(args):
++    if not args or len(args) > 1:
++        raise ValueError('ping_baidu 只接受一个域名参数')
++    if not SAFE_COMMANDS['ping_baidu']['param_pattern'].match(args[0]):
++        raise ValueError(f'无效的域名格式: {args[0]}')
++    return True
+ 
+ 
+ class ChatGPT:
+ 
+     @staticmethod
+     def chat(prompt):
++        if not sync_client:
++            logger.error('OpenAI API key not configured')
++            return 'ChatGPT服务未配置，请设置OPENAI_API_KEY环境变量'
++
++        try:
++            completion = sync_client.chat.completions.create(
++                model="gpt-3.5-turbo",
++                messages=[{"role": "user", "content": prompt}],
++                timeout=30
++            )
++            return completion.choices[0].message.content
++        except APITimeoutError:
++            logger.error('OpenAI API request timed out')
++            return '请求超时，请稍后重试'
++        except RateLimitError:
++            logger.error('OpenAI API rate limit exceeded')
++            return '请求过于频繁，请稍后重试'
++        except APIError as e:
++            logger.error(f'OpenAI API error: {e}')
++            return f'OpenAI服务异常: {str(e)}'
++        except ConnectionError:
++            logger.error('Failed to connect to OpenAI API')
++            return '无法连接到OpenAI服务，请检查网络设置'
++        except Exception as e:
++            logger.error(f'Unexpected error in ChatGPT.chat: {e}')
++            return '服务器出错了，请稍后重试'
++
++    @staticmethod
++    async def achat(prompt):
++        if not async_client:
++            logger.error('OpenAI API key not configured')
++            return 'ChatGPT服务未配置，请设置OPENAI_API_KEY环境变量'
++
+         try:
+-            completion = openai.ChatCompletion.create(model="gpt-3.5-turbo",
+-                                                      messages=[{"role": "user", "content": prompt}])
++            completion = await async_client.chat.completions.create(
++                model="gpt-3.5-turbo",
++                messages=[{"role": "user", "content": prompt}],
++                timeout=30
++            )
+             return completion.choices[0].message.content
++        except APITimeoutError:
++            logger.error('OpenAI API request timed out')
++            return '请求超时，请稍后重试'
++        except RateLimitError:
++            logger.error('OpenAI API rate limit exceeded')
++            return '请求过于频繁，请稍后重试'
++        except APIError as e:
++            logger.error(f'OpenAI API error: {e}')
++            return f'OpenAI服务异常: {str(e)}'
++        except ConnectionError:
++            logger.error('Failed to connect to OpenAI API')
++            return '无法连接到OpenAI服务，请检查网络设置'
+         except Exception as e:
+-            logger.error(e)
+-            return "服务器出错了"
++            logger.error(f'Unexpected error in ChatGPT.achat: {e}')
++            return '服务器出错了，请稍后重试'
+ 
+ 
+ class CommandHandler:
+@@ -30,31 +129,51 @@ class CommandHandler:
+         self.commands = commands.objects.all()
+ 
+     def run(self, title):
+-        """
+-        运行命令
+-        :param title: 命令
+-        :return: 返回命令执行结果
+-        """
+         cmd = list(
+             filter(
+                 lambda x: x.title.upper() == title.upper(),
+                 self.commands))
+         if cmd:
+-            return self.__run_command__(cmd[0].command)
++            return self.__run_command__(cmd[0].title, cmd[0].command)
+         else:
+-            return "未找到相关命令，请输入hepme获得帮助。"
++            return '未找到相关命令，请输入hepme获得帮助。'
++
++    def __run_command__(self, title, args_str=''):
++        if title not in SAFE_COMMANDS:
++            logger.warning(f'Attempted to execute unauthorized command: {title}')
++            return f'命令 "{title}" 不在允许执行的命令列表中'
+ 
+-    def __run_command__(self, cmd):
+         try:
+-            res = os.popen(cmd).read()
+-            return res
+-        except BaseException:
++            cmd_config = SAFE_COMMANDS[title]
++            args = args_str.split() if args_str else []
++
++            if 'max_params' in cmd_config and len(args) > cmd_config['max_params']:
++                return f'参数过多，该命令最多接受{cmd_config["max_params"]}个参数'
++
++            result = cmd_config['func'](args) if args else cmd_config['func']()
++
++            if result.returncode == 0:
++                output = result.stdout.strip()
++                return output if output else '命令执行成功，无输出'
++            else:
++                error_output = result.stderr.strip()
++                return f'命令执行失败: {error_output}'
++
++        except subprocess.TimeoutExpired:
++            return '命令执行超时，请稍后重试'
++        except ValueError as e:
++            return str(e)
++        except FileNotFoundError:
++            return '命令不存在，请联系管理员'
++        except Exception as e:
++            logger.error(f'Error executing command {title}: {e}')
+             return '命令执行出错!'
+ 
+     def get_help(self):
+         rsp = ''
+         for cmd in self.commands:
+-            rsp += '{c}:{d}\n'.format(c=cmd.title, d=cmd.describe)
++            if cmd.title in SAFE_COMMANDS:
++                rsp += '{c}:{d}\n'.format(c=cmd.title, d=SAFE_COMMANDS[cmd.title]['describe'])
+         return rsp
+ 
+ 
