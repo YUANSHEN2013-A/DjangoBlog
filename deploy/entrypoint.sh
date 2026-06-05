@@ -13,6 +13,35 @@ cd $DJANGODIR
 
 export PYTHONPATH=$DJANGODIR:$PYTHONPATH
 
+wait_for_elasticsearch() {
+    if [ -z "$DJANGO_ELASTICSEARCH_HOST" ]; then
+        echo "DJANGO_ELASTICSEARCH_HOST not set, skipping ES health check."
+        return 0
+    fi
+
+    ES_HOST="http://${DJANGO_ELASTICSEARCH_HOST}"
+    MAX_RETRIES=60
+    RETRY_INTERVAL=5
+
+    echo "Waiting for Elasticsearch at ${ES_HOST} to be available..."
+    retry_count=0
+    while [ $retry_count -lt $MAX_RETRIES ]; do
+        if curl -sf "${ES_HOST}/_cluster/health?wait_for_status=yellow&timeout=5s" > /dev/null 2>&1; then
+            echo "Elasticsearch is ready at ${ES_HOST}."
+            return 0
+        fi
+        retry_count=$((retry_count + 1))
+        echo "Elasticsearch not ready yet, retrying in ${RETRY_INTERVAL}s... ($retry_count/$MAX_RETRIES)"
+        sleep $RETRY_INTERVAL
+    done
+
+    echo "WARNING: Elasticsearch did not become ready after $((MAX_RETRIES * RETRY_INTERVAL))s."
+    echo "Continuing without ES - build_index may fail if ES is required."
+    return 1
+}
+
+wait_for_elasticsearch
+
 python manage.py makemigrations && \
   python manage.py migrate && \
   python manage.py collectstatic --noinput  && \

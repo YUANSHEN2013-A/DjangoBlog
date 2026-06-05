@@ -29,7 +29,7 @@ WORKDIR /code/djangoblog/
 
 # Install system dependencies
 RUN apt-get update && \
-    apt-get install default-libmysqlclient-dev gettext -y && \
+    apt-get install default-libmysqlclient-dev gettext curl -y && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy and install Python dependencies
