@@ -8,10 +8,11 @@ services:
     environment:
       - discovery.type=single-node
       - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - xpack.security.enabled=false
     ports:
       - 9200:9200
     volumes:
-      - ./bin/datas/es/:/usr/share/elasticsearch/data/
+      - es_data:/usr/share/elasticsearch/data/
 
   kibana:
     image: kibana:8.6.1
@@ -21,28 +22,42 @@ services:
       - 5601:5601
     environment:
       - ELASTICSEARCH_HOSTS=http://es:9200
+      - SERVER_BASEPATH=/kibana
+      - SERVER_REWRITEBASEPATH=true
 
   djangoblog:
-    build: .
+    build:
+      context: ../../
+      dockerfile: Dockerfile
     restart: always
-    command: bash -c 'sh /code/djangoblog/bin/docker_start.sh'
+    command: bash -c 'sh /code/djangoblog/deploy/entrypoint.sh'
     ports:
       - "8000:8000"
     volumes:
-      - ./collectedstatic:/code/djangoblog/collectedstatic
-      - ./uploads:/code/djangoblog/uploads
+      # 使用named volume共享静态文件给nginx，与 docker-compose.yml 保持一致
+      - static_files:/code/djangoblog/collectedstatic
+      - ../../logs:/code/djangoblog/logs
+      - ../../uploads:/code/djangoblog/uploads
     environment:
+      - DJANGO_DEBUG=False
       - DJANGO_MYSQL_DATABASE=djangoblog
       - DJANGO_MYSQL_USER=root
       - DJANGO_MYSQL_PASSWORD=QQQQwww123!@#
       - DJANGO_MYSQL_HOST=db
       - DJANGO_MYSQL_PORT=3306
-      - DJANGO_MEMCACHED_LOCATION=memcached:11211
+      - DJANGO_REDIS_URL=redis:6379
       - DJANGO_ELASTICSEARCH_HOST=es:9200
     links:
       - db
-      - memcached
+      - redis
+      - es
     depends_on:
       - db
+      - redis
+      - es
     container_name: djangoblog
 
+volumes:
+  es_data:
+  static_files:
+  mysql_data:
