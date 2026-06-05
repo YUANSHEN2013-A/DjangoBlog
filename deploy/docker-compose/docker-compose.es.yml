@@ -1,48 +1,202 @@
-version: '3'
+version: '3.8'
 
 services:
+  db:
+    image: mysql:latest
+    restart: always
+    environment:
+      - MYSQL_DATABASE=djangoblog
+      - MYSQL_ROOT_PASSWORD=QQQQwww123!@#
+    ports:
+      - "3306:3306"
+    volumes:
+      - mysql_data:/var/lib/mysql
+    container_name: db
+
+  redis:
+    restart: always
+    image: redis:latest
+    container_name: redis
+    ports:
+      - "6379:6379"
+
   es:
     image: liangliangyy/elasticsearch-analysis-ik:8.6.1
     container_name: es
     restart: always
     environment:
       - discovery.type=single-node
-      - "ES_JAVA_OPTS=-Xms512m -Xmx512m"
+      - ES_JAVA_OPTS=-Xms512m -Xmx512m
+      - xpack.security.enabled=false
+      - xpack.monitoring.templates.enabled=false
     ports:
-      - 9200:9200
+      - "9200:9200"
     volumes:
-      - ./bin/datas/es/:/usr/share/elasticsearch/data/
+      - es_data:/usr/share/elasticsearch/data
+
+  es-init:
+    image: python:3.11-slim
+    container_name: es-init
+    restart: "no"
+    depends_on:
+      - es
+    environment:
+      - ES_HOST=http://es:9200
+      - ES_INDEX_NAME=djangoblog
+      - ES_WAIT_TIMEOUT=180
+      - ES_WAIT_INTERVAL=3
+    command: >
+      /bin/sh -c "python - <<'PY'
+      import json
+      import os
+      import sys
+      import time
+      from urllib import error, request
+
+      host = os.environ['ES_HOST']
+      index_name = os.environ.get('ES_INDEX_NAME', 'djangoblog')
+      timeout = int(os.environ.get('ES_WAIT_TIMEOUT', '180'))
+      interval = int(os.environ.get('ES_WAIT_INTERVAL', '3'))
+      deadline = time.time() + timeout
+      health_url = f'{host}/_cluster/health?wait_for_status=yellow&timeout=1s'
+      index_url = f'{host}/{index_name}'
+      mapping = {
+          'settings': {
+              'number_of_shards': 1,
+              'number_of_replicas': 0,
+          },
+          'mappings': {
+              'properties': {
+                  'body': {'type': 'text', 'analyzer': 'ik_max_word', 'search_analyzer': 'ik_smart'},
+                  'title': {'type': 'text', 'analyzer': 'ik_max_word', 'search_analyzer': 'ik_smart'},
+                  'author': {
+                      'properties': {
+                          'nickname': {'type': 'text', 'analyzer': 'ik_max_word', 'search_analyzer': 'ik_smart'},
+                          'id': {'type': 'integer'},
+                      }
+                  },
+                  'category': {
+                      'properties': {
+                          'name': {'type': 'text', 'analyzer': 'ik_max_word', 'search_analyzer': 'ik_smart'},
+                          'id': {'type': 'integer'},
+                      }
+                  },
+                  'tags': {
+                      'properties': {
+                          'name': {'type': 'text', 'analyzer': 'ik_max_word', 'search_analyzer': 'ik_smart'},
+                          'id': {'type': 'integer'},
+                      }
+                  },
+                  'pub_time': {'type': 'date'},
+                  'status': {'type': 'text'},
+                  'comment_status': {'type': 'text'},
+                  'type': {'type': 'text'},
+                  'views': {'type': 'integer'},
+                  'article_order': {'type': 'integer'},
+              }
+          },
+      }
+
+      while time.time() < deadline:
+          try:
+              with request.urlopen(health_url, timeout=5) as response:
+                  payload = json.loads(response.read().decode('utf-8') or '{}')
+                  if payload.get('status') in {'yellow', 'green'}:
+                      break
+          except Exception:
+              pass
+          time.sleep(interval)
+      else:
+          print('Timed out waiting for Elasticsearch', file=sys.stderr)
+          sys.exit(1)
+
+      head_request = request.Request(index_url, method='HEAD')
+      try:
+          with request.urlopen(head_request, timeout=5) as response:
+              if response.status < 400:
+                  print(f'Index {index_name} already exists')
+                  sys.exit(0)
+      except error.HTTPError as exc:
+          if exc.code != 404:
+              print(f'Failed to query index {index_name}: {exc}', file=sys.stderr)
+              sys.exit(1)
+      except Exception as exc:
+          print(f'Failed to query index {index_name}: {exc}', file=sys.stderr)
+          sys.exit(1)
+
+      create_request = request.Request(
+          index_url,
+          data=json.dumps(mapping).encode('utf-8'),
+          headers={'Content-Type': 'application/json'},
+          method='PUT',
+      )
+      with request.urlopen(create_request, timeout=5) as response:
+          print(response.read().decode('utf-8'))
+      PY"
 
   kibana:
     image: kibana:8.6.1
     restart: always
     container_name: kibana
+    depends_on:
+      - es
     ports:
-      - 5601:5601
+      - "5601:5601"
     environment:
       - ELASTICSEARCH_HOSTS=http://es:9200
+      - SERVER_BASEPATH=/kibana
+      - SERVER_REWRITEBASEPATH=true
 
   djangoblog:
-    build: .
+    build:
+      context: ../../
+      dockerfile: Dockerfile
     restart: always
-    command: bash -c 'sh /code/djangoblog/bin/docker_start.sh'
+    entrypoint:
+      - /code/djangoblog/deploy/entrypoint.sh
     ports:
       - "8000:8000"
     volumes:
-      - ./collectedstatic:/code/djangoblog/collectedstatic
+      - static_files:/code/djangoblog/collectedstatic
+      - ./logs:/code/djangoblog/logs
       - ./uploads:/code/djangoblog/uploads
     environment:
+      - DJANGO_DEBUG=False
       - DJANGO_MYSQL_DATABASE=djangoblog
       - DJANGO_MYSQL_USER=root
       - DJANGO_MYSQL_PASSWORD=QQQQwww123!@#
       - DJANGO_MYSQL_HOST=db
       - DJANGO_MYSQL_PORT=3306
-      - DJANGO_MEMCACHED_LOCATION=memcached:11211
-      - DJANGO_ELASTICSEARCH_HOST=es:9200
-    links:
-      - db
-      - memcached
+      - DJANGO_REDIS_URL=redis:6379/0
+      - DJANGO_ELASTICSEARCH_HOST=http://es:9200
+      - ELASTICSEARCH_VERIFY_CERTS=False
     depends_on:
       - db
+      - redis
+      - es
+      - es-init
     container_name: djangoblog
 
+  nginx:
+    restart: always
+    image: nginx:latest
+    command: >
+      /bin/sh -c 'printf "%s\n" "$${KIBANA_BASIC_AUTH_HTPASSWD}" > /etc/nginx/kibana.htpasswd
+      && exec nginx -g "daemon off;"'
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      - KIBANA_BASIC_AUTH_HTPASSWD=${KIBANA_BASIC_AUTH_HTPASSWD:?set a htpasswd entry for /kibana access}
+    volumes:
+      - ../nginx.conf:/etc/nginx/nginx.conf
+      - static_files:/code/djangoblog/collectedstatic:ro
+    depends_on:
+      - djangoblog
+      - kibana
+    container_name: nginx
+
+volumes:
+  mysql_data:
+  static_files:
+  es_data:
